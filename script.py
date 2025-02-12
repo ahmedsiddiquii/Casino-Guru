@@ -12,6 +12,8 @@ import os
 import random
 
 
+MAX_CHUNK_DATA = 1000
+
 def normalize_key(key):
     key = key.lower().replace(' ', '_')
     return key
@@ -24,8 +26,7 @@ def normalize_to_slug(text):
 
 
 class GameScraper:
-    def __init__(self, start_from_url=12000):
-        self.start_from_url = start_from_url
+    def __init__(self):
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15',
@@ -63,14 +64,92 @@ class GameScraper:
         self.thread_count_lock = threading.Lock()
         self.active_threads = 0
         self.processed_urls_file = 'processed_urls.txt'
-        self.data_file = 'data_3.json'
+        self.data_file = 'data_chunk_{}.json'
+        self.current_chunk = 1
 
-        # Upewniamy się, że pliki istnieją
-        for file in [self.processed_urls_file, self.data_file]:
-            if not os.path.exists(file):
-                with open(file, 'w', encoding='utf-8') as f:
-                    if file == self.data_file:
-                        json.dump([], f)
+        # Find the latest chunk number by checking existing files
+        while os.path.exists(self.data_file.format(self.current_chunk)):
+            with open(self.data_file.format(self.current_chunk), 'r', encoding='utf-8') as f:
+                try:
+                    data = json.load(f)
+                    if len(data) >= MAX_CHUNK_DATA:
+                        self.current_chunk += 1
+                    else:
+                        break
+                except json.JSONDecodeError:
+                    break
+
+        # Initialize popular games with error handling
+        try:
+            print("Pobieranie popularnych gier. To zajmie trochę czasu...")
+            self.popular_games = self.get_popular_games()
+            print(f"Pobrano {len(self.popular_games)} popularne gry")
+            print(f"Pierwsze 5 popularnych gier: {self.popular_games[:5]}")
+        except Exception as e:
+            print(f"Error fetching popular games: {e}")
+            self.popular_games = []
+
+    def _verify_proxy(self, proxy_url: str, timeout: int = 10) -> bool:
+        """Verify if a proxy is working by testing it against multiple URLs."""
+        test_urls = [
+            'https://www.google.com',
+            'https://www.example.com',
+            'https://casino.guru'
+        ]
+
+        proxies = {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+
+        headers = random.choice(self.headers_pool)
+
+        try:
+            for url in test_urls:
+                response = requests.get(
+                    url,
+                    proxies=proxies,
+                    headers=headers,
+                    timeout=timeout,
+                    verify=True,
+                    allow_redirects=True,
+                )
+                if response.status_code == 200:
+                    print(f"Proxy {proxy_url} working - Status: {response.status_code}")
+                    return True
+                else:
+                    print(f"Proxy {proxy_url} failed - Status: {response.status_code}")
+                    break
+
+        except Exception as e:
+            print(f"Proxy {proxy_url} verification failed: {str(e)}")
+        return False
+
+    def _get_proxy(self) -> dict:
+        proxies_file = 'proxies.json'
+
+        try:
+            if os.path.exists(proxies_file):
+                with open(proxies_file, 'r') as file:
+                    proxies = json.load(file)
+
+                proxy_dict = random.choice(proxies)
+                # Construct proxy URL
+                proxy = f"{proxy_dict['ip']}:{proxy_dict['port']}"
+                if proxy_dict.get('login') and proxy_dict.get('password'):
+                    proxy = f"{proxy_dict['login']}:{proxy_dict['password']}@" + proxy
+                proxy_url = f"http://{proxy}"
+                print(f"Verify proxy: {proxy_url}")
+                try:
+                    # Verify proxy
+                    if self._verify_proxy(proxy_url):
+                        print(f"Znaleziono działający serwer proxy: {proxy_url}")
+                        return proxy_url
+                except Exception as e:
+                    print(f"Błąd weryfikacji serwera proxy: {str(e)}")
+        except Exception as e:
+            print(f"Błąd ładowania serwerów proxy: {e}")
+        return None
 
     def setup_session(self):
         retry_strategy = Retry(
@@ -81,22 +160,72 @@ class GameScraper:
         )
 
         self.session = requests.Session()
+
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_maxsize=10)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.session.headers = random.choice(self.headers_pool)
 
-    def get_url_number(self, url):
+        proxy = self._get_proxy()
+        if proxy:
+            print(f"Korzystanie z serwera proxy: {proxy}")
+            proxies = {
+                "http": proxy,
+                "https": proxy,
+            }
+            self.session.proxies.update(proxies)
+
+    def get_popular_games(self):
+        all_titles = []
+
+        payload = 'sort_by=RECOMMENDED_DESC'
+        headers = {
+            'accept': 'application/json, text/plain, /',
+            'accept-language': 'pl,pl-PL;q=0.9',
+            'cache-control': 'no-cache',
+            'content-type': 'application/x-www-form-urlencoded',
+            'cookie': 'visitorIdIgnore=false; firstSessionLandingPageCode=homepage; firstSessionLandingPageType=homepage; firstSessionLandingPageCategory=homepage; landingPageBeforeRedirect=https://casino.guru/; adwTraffic=false; firstHit=1737928890907; cookies_policy_alert_showed=true; returnIn30Days=true; tZone=Europe/Warsaw; restCSSIsCached=true; _ga=GA1.1.472709381.1739020145; complaintCasinoFilter=0; complaintSort=csn; signupStateLocalStorageRemove=true; uSortDesc2=true; uSortDesc=true; aSortDesc=true; ispBlockingCookie=UNKNOWN; usingVpnCookie=UNKNOWN; refererAlsCookie=https://casino.guru/; userIpCountry=PL; preferredCurrencyCookie=PLN; prefferedLanguages=PL|EN; _ga_0MSVEZXGFF=GS1.1.1739020313.1.1.1739020368.0.0.0; _ga_E48265R7V8=GS1.1.1739020314.1.1.1739020368.0.0.0; landingPageCode=homepage; landingPageType=homepage; landingPageCategory=homepage; userscore={%22points%22:0%2C%22ranking%22:0%2C%22casinosVisited%22:0%2C%22bonusesVisited%22:0%2C%22playFreeVisited%22:0%2C%22showMoreVisited%22:0%2C%22focusTime%22:0%2C%22struggling%22:false%2C%22game%22:24470}; visitorId=1518128072422208; abTest=t-31#b|t-32#a|t-35#c|t-34#a; loggingUserErrors=false; mouseFlow=false; lastHit=1739387879556; _ga_87PKW81MD7=GS1.1.1739387554.7.1.1739387880.0.0.0; JSESSIONID=8AB2EA8A7FA292783B327C2B30A59BDB; _ga_ZP4V1V9Y4X=GS1.1.1739387554.5.1.1739387922.17.0.0; JSESSIONID=FE15EA218B336191F2E7678F44A2C059; abTest=t-31#b|t-32#a|t-35#c|t-34#a',
+            'origin': 'https://casino.guru',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://casino.guru/free-casino-games/most-popular',
+            'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
+        }
+
+        url = "https://casinoguru-en.com/frontendService/gamesFilterServiceMore?page={}&initialPage=1"
+        page = 1
+
         try:
-            # Extract the last part of the URL and convert to integer
-            parts = url.rstrip('/').split('/')
-            for part in reversed(parts):
-                if part.isdigit():
-                    return int(part)
-            return 0
-        except (ValueError, IndexError):
-            print(f"Error extracting number from URL: {url}")
-            return 0
+            while True:
+                response = requests.post(
+                    url.format(page),
+                    data=payload,
+                    headers=headers,
+                    timeout=30,
+                    allow_redirects=True,
+                    verify=True,
+                )
+
+                tree = html.fromstring(response.text)
+                titles = tree.xpath('//a[@class="game-item-name"]/text()')
+
+                if titles:
+                    all_titles.extend([title.strip().lower() for title in titles])
+                    page += 1
+                    time.sleep(random.uniform(2, 5))  # Add delay between pages
+                else:
+                    print("No more popular games found!")
+                    print(f"Page: {page}")
+                    break
+        except Exception as e:
+            print(f"Unexpected error in get_popular_games: {str(e)}")
+        return all_titles
 
     def get_processed_urls(self):
         processed_urls = set()
@@ -155,16 +284,24 @@ class GameScraper:
         with self.file_lock:
             try:
                 current_data = []
-                if os.path.exists(self.data_file):
-                    with open(self.data_file, 'r', encoding='utf-8') as f:
+
+                # Load current chunk file if it exists
+                if os.path.exists(self.data_file.format(self.current_chunk)):
+                    with open(self.data_file.format(self.current_chunk), 'r', encoding='utf-8') as f:
                         try:
                             current_data = json.load(f)
                         except json.JSONDecodeError:
                             current_data = []
 
+                # Check if current chunk is full
+                if len(current_data) >= MAX_CHUNK_DATA:
+                    self.current_chunk += 1
+                    current_data = []
+
+                # Add new game data
                 current_data.append(game_data)
 
-                with open(self.data_file, 'w', encoding='utf-8') as f:
+                with open(self.data_file.format(self.current_chunk), 'w', encoding='utf-8') as f:
                     json.dump(current_data, f, ensure_ascii=False, indent=2)
 
             except Exception as e:
@@ -195,7 +332,7 @@ class GameScraper:
 
             for element in elements:
                 # If we find a heading, start a new section
-                if element.tag == 'h3':
+                if element.tag in ['h3', 'h2']:
                     current_section = element.text.strip()
                     review_sections[current_section] = {
                         'text': [],
@@ -211,7 +348,6 @@ class GameScraper:
                             review_sections[current_section]['text'].append(text)
 
                     elif element.tag == 'figure':
-                        print("figure element found")
                         # Handle images
                         images = element.xpath('./div/a')
                         for img in images:
@@ -233,11 +369,9 @@ class GameScraper:
                         # Handle videos
                         videos = element.xpath('./div/iframe')
                         for video in videos:
-                            print("Video attributes:", video.attrib)
                             # Try getting src attribute in different ways
                             video_src = video.get('src') or video.get('data-src')
 
-                            print(f"video source: {video_src}")  # Debug print
                             if video_src:
                                 media_item = {
                                     'type': 'video',
@@ -275,8 +409,6 @@ class GameScraper:
             overview = tree.xpath('//div[@class="game-detail-main-overview"]')
             h2 = overview[0].xpath('./h2/text()')
             title = h2[0].strip() if h2 else None
-            # if title:
-            #     title = title.replace("Play in Demo Mode", "").strip()
 
             game_src = None
             embed_button = tree.xpath('//div[@id="game-embed-button"]/@data-embed-content')
@@ -357,8 +489,17 @@ class GameScraper:
 
             about = tree.xpath('//div[@class="game-detail-main-about"]//p')
             game_review = self.extract_game_review(tree)
+
+            # Add popularity ranking
+            popularity = None
+            if title:
+                title_lower = title.lower()
+                if title_lower in self.popular_games:
+                    popularity = self.popular_games.index(title_lower) + 1
+
             game_data = {
                 "title": title,
+                "popularity": popularity,
                 "thumbnail": thumbnail_url,
                 "rating": float(rating_value) if rating_value else None,
                 "images": images,
@@ -392,7 +533,7 @@ class GameScraper:
             if game_data:
                 with self.data_lock:
                     self.games_processed += 1
-                    url_number = self.get_url_number(url)
+                    url_number = self.games_processed + len(self.processed_urls)
                     print(f"\nProcessing URL number: {url_number}")
                     print(f"Found data for: {game_data['title']}")
                     print(f"Processed games: {self.games_processed}")
@@ -422,27 +563,20 @@ class GameScraper:
 
             # Get all URLs from sitemap
             all_urls = [loc.text for loc in root.findall('.//ns:loc', namespace)]
-            print(f"\nZnaleziono łącznie URL-i: {len(all_urls)}")
-
-            # Starting from index 10460
-            urls_to_process = all_urls[:15]
 
             # Remove already processed URLs
-            locations_to_process = [url for url in urls_to_process if url not in self.processed_urls]
+            locations_to_process = [url for url in all_urls if url not in self.processed_urls]
 
             print(f"\nKonfiguracja scrapera:")
-            print(f"Całkowita liczba URL-i: {len(all_urls)}")
-            print(f"Pomijam pierwszych {self.start_from_url} URL-i")
-            print(f"URL-i do przetworzenia: {len(urls_to_process)}")
+            print(f"Znaleziono łącznie URL-i: {len(all_urls)}")
+            print(f"URL-i do przetworzenia: {len(locations_to_process)}")
             print(f"Już przetworzonych: {len(self.processed_urls)}")
-            print(f"Pozostało do przetworzenia: {len(locations_to_process)}")
 
             if locations_to_process:
                 print(f"\nPierwsze 5 URL-i do przetworzenia:")
                 for url in locations_to_process[:5]:
                     print(f"- {url}")
 
-            if locations_to_process:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [executor.submit(self.process_game, url) for url in locations_to_process]
                     for future in concurrent.futures.as_completed(futures):
@@ -451,13 +585,14 @@ class GameScraper:
                         except Exception as e:
                             print(f"Thread error: {e}")
 
-            print(f"\nZakończono pobieranie. Łącznie przetworzono {self.games_processed} nowych gier.")
-
+                print(f"\nZakończono pobieranie. Łącznie przetworzono {self.games_processed} nowych gier.")
+            else:
+                print("Brak nowych URL-i do przetworzenia.")
         except Exception as e:
             print(f"An error occurred: {e}")
 
 
 if __name__ == "__main__":
     sitemap_url = "https://casino.guru/games-sitemap.xml"
-    scraper = GameScraper(start_from_url=14200)  # Ustawienie początkowego URL-a
+    scraper = GameScraper()  # Ustawienie początkowego URL-a
     scraper.analyze_sitemap(sitemap_url)
