@@ -66,6 +66,11 @@ class GameScraper:
         self.processed_urls_file = 'processed_urls.txt'
         self.data_file = 'data_chunk_{}.json'
         self.current_chunk = 1
+        self.games_dict = {
+            "popular_games": "RECOMMENDED_DESC",
+            "new_games": "LATEST_DESC",
+            "highest_rtp_games": "RTP_DESC",
+        }
 
         # Find the latest chunk number by checking existing files
         while os.path.exists(self.data_file.format(self.current_chunk)):
@@ -79,76 +84,73 @@ class GameScraper:
                 except json.JSONDecodeError:
                     break
 
-        # Initialize popular games with error handling
-        try:
-            print("Pobieranie popularnych gier. To zajmie trochę czasu...")
-            self.popular_games = self.get_popular_games()
-            print(f"Pobrano {len(self.popular_games)} popularne gry")
-            print(f"Pierwsze 5 popularnych gier: {self.popular_games[:5]}")
-        except Exception as e:
-            print(f"Error fetching popular games: {e}")
-            self.popular_games = []
+        # Initialize all games with error handling
+        for key, value in self.games_dict.items():
+            try:
+                print(f"Pobieranie {key}. To zajmie trochę czasu...")
+                games = self.get_games(value)
+                if games:
+                    self.__dict__[key] = games
+                print(f"Pobrano {len(games)} {key}")
+                print(f"Pierwsze 10 {key}: {games[:10]}")
+            except Exception as e:
+                print(f"Error fetching {key}: {e}")
+                self.__dict__[key] = []
 
     def _verify_proxy(self, proxy_url: str, timeout: int = 10) -> bool:
         """Verify if a proxy is working by testing it against multiple URLs."""
-        test_urls = [
-            'https://www.google.com',
-            'https://www.example.com',
-            'https://casino.guru'
-        ]
+        url = 'https://casino.guru'
 
         proxies = {
             'http': proxy_url,
             'https': proxy_url
         }
 
-        headers = random.choice(self.headers_pool)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
         try:
-            for url in test_urls:
-                response = requests.get(
-                    url,
-                    proxies=proxies,
-                    headers=headers,
-                    timeout=timeout,
-                    verify=True,
-                    allow_redirects=True,
-                )
-                if response.status_code == 200:
-                    print(f"Proxy {proxy_url} working - Status: {response.status_code}")
-                    return True
-                else:
-                    print(f"Proxy {proxy_url} failed - Status: {response.status_code}")
-                    break
+            response = requests.get(
+                url,
+                proxies=proxies,
+                headers=headers,
+                timeout=timeout,
+                verify=True,
+                allow_redirects=True,
+            )
+            if response.status_code == 200:
+                print(f"Proxy {proxy_url} working - Status: {response.status_code}")
+                return True
+            else:
+                print(f"Proxy {proxy_url} failed - Status: {response.status_code}")
 
         except Exception as e:
             print(f"Proxy {proxy_url} verification failed: {str(e)}")
         return False
 
-    def _get_proxy(self) -> dict:
-        proxies_file = 'proxies.json'
+    def _get_proxy(self):
+        proxies_file = 'formatted_proxies.txt'
 
         try:
             if os.path.exists(proxies_file):
                 with open(proxies_file, 'r') as file:
-                    proxies = json.load(file)
+                    proxies = file.read().splitlines()
 
-                proxy_dict = random.choice(proxies)
-                # Construct proxy URL
-                proxy = f"{proxy_dict['ip']}:{proxy_dict['port']}"
-                if proxy_dict.get('login') and proxy_dict.get('password'):
-                    proxy = f"{proxy_dict['login']}:{proxy_dict['password']}@" + proxy
-                proxy_url = f"http://{proxy}"
-                print(f"Verify proxy: {proxy_url}")
-                try:
-                    # Verify proxy
-                    if self._verify_proxy(proxy_url):
-                        print(f"Znaleziono działający serwer proxy: {proxy_url}")
-                        return proxy_url
-                except Exception as e:
-                    print(f"Błąd weryfikacji serwera proxy: {str(e)}")
+                random_proxies = random.choices(proxies, k=5)
+                for proxy_url in random_proxies:
+                    print("\nWeryfikowanie serwera proxy: ", proxy_url)
+                    try:
+                        # Verify proxy
+                        if self._verify_proxy(proxy_url):
+                            print("Znaleziono działający serwer proxy: ", proxy_url)
+                            return proxy_url
+                    except Exception as e:
+                        print("Błąd weryfikacji serwera proxy: ", str(e))
+
+                print("Sprawdzono 5 różne serwery proxy, ale żaden nie działa")
+            else:
+                print("Brak pliku z serwerami proxy: ", proxies_file)
         except Exception as e:
-            print(f"Błąd ładowania serwerów proxy: {e}")
+            print("Błąd pobierania serwerów proxy: ", str(e))
         return None
 
     def setup_session(self):
@@ -156,7 +158,7 @@ class GameScraper:
             total=3,
             backoff_factor=2,
             status_forcelist=[403, 429, 500, 502, 503, 504],
-            allowed_methods=["GET", "HEAD"]
+            allowed_methods=["GET", "HEAD", "POST"]
         )
 
         self.session = requests.Session()
@@ -175,56 +177,99 @@ class GameScraper:
             }
             self.session.proxies.update(proxies)
 
-    def get_popular_games(self):
-        all_titles = []
+    def get_games(self, game_type):
+        def fetch_page(page_num):
+            try:
+                payload = f'sort_by={game_type}'
+                headers = {
+                    'accept': 'application/json, text/plain, /',
+                    'accept-language': 'pl,pl-PL;q=0.9',
+                    'cache-control': 'no-cache',
+                    'content-type': 'application/x-www-form-urlencoded',
+                    'cookie': 'visitorIdIgnore=false; firstSessionLandingPageCode=homepage; firstSessionLandingPageType=homepage; firstSessionLandingPageCategory=homepage; landingPageBeforeRedirect=https://casino.guru/; adwTraffic=false; firstHit=1737928890907; cookies_policy_alert_showed=true; returnIn30Days=true; tZone=Europe/Warsaw; restCSSIsCached=true; _ga=GA1.1.472709381.1739020145; complaintCasinoFilter=0; complaintSort=csn; signupStateLocalStorageRemove=true; uSortDesc2=true; uSortDesc=true; aSortDesc=true; ispBlockingCookie=UNKNOWN; usingVpnCookie=UNKNOWN; refererAlsCookie=https://casino.guru/; userIpCountry=PL; preferredCurrencyCookie=PLN; prefferedLanguages=PL|EN; _ga_0MSVEZXGFF=GS1.1.1739020313.1.1.1739020368.0.0.0; _ga_E48265R7V8=GS1.1.1739020314.1.1.1739020368.0.0.0; landingPageCode=homepage; landingPageType=homepage; landingPageCategory=homepage; userscore={%22points%22:0%2C%22ranking%22:0%2C%22casinosVisited%22:0%2C%22bonusesVisited%22:0%2C%22playFreeVisited%22:0%2C%22showMoreVisited%22:0%2C%22focusTime%22:0%2C%22struggling%22:false%2C%22game%22:24470}; visitorId=1518128072422208; abTest=t-31#b|t-32#a|t-35#c|t-34#a; loggingUserErrors=false; mouseFlow=false; lastHit=1739387879556; _ga_87PKW81MD7=GS1.1.1739387554.7.1.1739387880.0.0.0; JSESSIONID=8AB2EA8A7FA292783B327C2B30A59BDB; _ga_ZP4V1V9Y4X=GS1.1.1739387554.5.1.1739387922.17.0.0; JSESSIONID=FE15EA218B336191F2E7678F44A2C059; abTest=t-31#b|t-32#a|t-35#c|t-34#a',
+                    'origin': 'https://casino.guru',
+                    'pragma': 'no-cache',
+                    'priority': 'u=1, i',
+                    'referer': 'https://casino.guru/free-casino-games/most-popular',
+                    'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"macOS"',
+                    'sec-fetch-dest': 'empty',
+                    'sec-fetch-mode': 'cors',
+                    'sec-fetch-site': 'same-origin',
+                    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
+                }
+                url = "https://casino.guru/frontendService/gamesFilterServiceMore?page={}&initialPage=1"
 
-        payload = 'sort_by=RECOMMENDED_DESC'
-        headers = {
-            'accept': 'application/json, text/plain, /',
-            'accept-language': 'pl,pl-PL;q=0.9',
-            'cache-control': 'no-cache',
-            'content-type': 'application/x-www-form-urlencoded',
-            'cookie': 'visitorIdIgnore=false; firstSessionLandingPageCode=homepage; firstSessionLandingPageType=homepage; firstSessionLandingPageCategory=homepage; landingPageBeforeRedirect=https://casino.guru/; adwTraffic=false; firstHit=1737928890907; cookies_policy_alert_showed=true; returnIn30Days=true; tZone=Europe/Warsaw; restCSSIsCached=true; _ga=GA1.1.472709381.1739020145; complaintCasinoFilter=0; complaintSort=csn; signupStateLocalStorageRemove=true; uSortDesc2=true; uSortDesc=true; aSortDesc=true; ispBlockingCookie=UNKNOWN; usingVpnCookie=UNKNOWN; refererAlsCookie=https://casino.guru/; userIpCountry=PL; preferredCurrencyCookie=PLN; prefferedLanguages=PL|EN; _ga_0MSVEZXGFF=GS1.1.1739020313.1.1.1739020368.0.0.0; _ga_E48265R7V8=GS1.1.1739020314.1.1.1739020368.0.0.0; landingPageCode=homepage; landingPageType=homepage; landingPageCategory=homepage; userscore={%22points%22:0%2C%22ranking%22:0%2C%22casinosVisited%22:0%2C%22bonusesVisited%22:0%2C%22playFreeVisited%22:0%2C%22showMoreVisited%22:0%2C%22focusTime%22:0%2C%22struggling%22:false%2C%22game%22:24470}; visitorId=1518128072422208; abTest=t-31#b|t-32#a|t-35#c|t-34#a; loggingUserErrors=false; mouseFlow=false; lastHit=1739387879556; _ga_87PKW81MD7=GS1.1.1739387554.7.1.1739387880.0.0.0; JSESSIONID=8AB2EA8A7FA292783B327C2B30A59BDB; _ga_ZP4V1V9Y4X=GS1.1.1739387554.5.1.1739387922.17.0.0; JSESSIONID=FE15EA218B336191F2E7678F44A2C059; abTest=t-31#b|t-32#a|t-35#c|t-34#a',
-            'origin': 'https://casino.guru',
-            'pragma': 'no-cache',
-            'priority': 'u=1, i',
-            'referer': 'https://casino.guru/free-casino-games/most-popular',
-            'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"macOS"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
-        }
-
-        url = "https://casinoguru-en.com/frontendService/gamesFilterServiceMore?page={}&initialPage=1"
-        page = 1
-
-        try:
-            while True:
-                response = requests.post(
-                    url.format(page),
-                    data=payload,
+                print(f"Fetching {game_type} - Page: {page_num}")
+                response = self.make_request(
+                    url.format(page_num),
+                    method="POST",
                     headers=headers,
-                    timeout=30,
-                    allow_redirects=True,
-                    verify=True,
+                    payload=payload
                 )
 
                 tree = html.fromstring(response.text)
                 titles = tree.xpath('//a[@class="game-item-name"]/text()')
 
-                if titles:
-                    all_titles.extend([title.strip().lower() for title in titles])
-                    page += 1
-                    time.sleep(random.uniform(2, 5))  # Add delay between pages
-                else:
-                    print("No more popular games found!")
-                    print(f"Page: {page}")
-                    break
+                # Check if we've reached the end
+                if not titles:
+                    return None
+
+                return [title.strip().lower() for title in titles]
+
+            except Exception as e:
+                print(f"Error fetching page {page_num}: {str(e)}")
+                return None
+
+        all_titles = []
+        max_workers = 5    # Number of concurrent threads
+        current_page = 1
+        end_reached = False
+
+        try:
+            while not end_reached:
+                print(f"\nProcessing batch starting at page {current_page}")
+                batch_results = []
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Create futures for the current batch
+                    futures = {
+                        executor.submit(fetch_page, page_num): page_num
+                        for page_num in range(current_page, current_page + max_workers)
+                    }
+
+                    # Process completed futures
+                    for future in concurrent.futures.as_completed(futures):
+                        page_num = futures[future]
+                        try:
+                            titles = future.result()
+                            if titles is None:
+                                end_reached = True
+                                print(f"No more games found after page {page_num-1}")
+                                break
+
+                            batch_results.append((page_num, titles))
+                            print(f"Successfully processed page {page_num}, "
+                                f"found {len(titles)} games")
+                        except Exception as e:
+                            print(f"Error processing page {page_num}: {str(e)}")
+                            end_reached = True
+                            break
+
+                # Sort batch results by page number and add to all_titles
+                for _, titles in sorted(batch_results):
+                    all_titles.extend(titles)
+
+                print(f"Total games found so far: {len(all_titles)}")
+
+                if not end_reached:
+                    current_page += max_workers
+                    time.sleep(random.uniform(2, 4))  # Delay between batches
+
         except Exception as e:
-            print(f"Unexpected error in get_popular_games: {str(e)}")
+            print(f"Unexpected error in get_games: {str(e)}")
+
         return all_titles
 
     def get_processed_urls(self):
@@ -245,13 +290,13 @@ class GameScraper:
             except Exception as e:
                 print(f"Error saving URL: {e}")
 
-    def make_request(self, url, max_retries=3):
+    def make_request(self, url, method="GET", headers=None, payload=None, max_retries=5):
         for attempt in range(max_retries):
             try:
                 time.sleep(random.uniform(2, 5))
 
                 with self.session_lock:
-                    self.session.headers = random.choice(self.headers_pool)
+                    self.session.headers = headers or random.choice(self.headers_pool)
 
                     if self.total_requests > 0 and self.total_requests % 100 == 0:
                         print("\nRefreshing session...")
@@ -259,8 +304,10 @@ class GameScraper:
                         self.setup_session()
                         print("Session refreshed")
 
-                    response = self.session.get(
+                    response = self.session.request(
+                        method,
                         url,
+                        data=payload,
                         timeout=30,
                         allow_redirects=True,
                         verify=True
@@ -490,16 +537,24 @@ class GameScraper:
             about = tree.xpath('//div[@class="game-detail-main-about"]//p')
             game_review = self.extract_game_review(tree)
 
-            # Add popularity ranking
+            # Add game ranking
             popularity = None
+            newest = None
+            highest_rtp = None
             if title:
                 title_lower = title.lower()
                 if title_lower in self.popular_games:
                     popularity = self.popular_games.index(title_lower) + 1
+                if title_lower in self.new_games:
+                    newest = self.new_games.index(title_lower) + 1
+                if title_lower in self.highest_rtp_games:
+                    highest_rtp = self.highest_rtp_games.index(title_lower) + 1
 
             game_data = {
                 "title": title,
                 "popularity": popularity,
+                "newest": newest,
+                "highest_rtp": highest_rtp,
                 "thumbnail": thumbnail_url,
                 "rating": float(rating_value) if rating_value else None,
                 "images": images,
