@@ -25,6 +25,16 @@ def normalize_to_slug(text):
     return text
 
 
+def write_to_file(data, filename):
+    with open(filename, 'w', encoding='utf-8') as f:    # Zapis do pliku
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def read_from_file(filename):   # Odczyt z pliku
+    with open(filename, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
 class GameScraper:
     def __init__(self):
         self.user_agents = [
@@ -66,36 +76,43 @@ class GameScraper:
         self.processed_urls_file = 'processed_urls.txt'
         self.data_file = 'data_chunk_{}.json'
         self.current_chunk = 1
-        self.games_dict = {
-            "popular_games": "RECOMMENDED_DESC",
-            "new_games": "LATEST_DESC",
-            "highest_rtp_games": "RTP_DESC",
-        }
+        self.current_chunk_data = []
 
         # Find the latest chunk number by checking existing files
         while os.path.exists(self.data_file.format(self.current_chunk)):
-            with open(self.data_file.format(self.current_chunk), 'r', encoding='utf-8') as f:
+            with self.file_lock:
                 try:
-                    data = json.load(f)
-                    if len(data) >= MAX_CHUNK_DATA:
+                    chunk_data = read_from_file(self.data_file.format(self.current_chunk))
+                    if not chunk_data:  # Empty file
+                        break
+                    if len(chunk_data) >= MAX_CHUNK_DATA:
                         self.current_chunk += 1
+                        self.current_chunk_data = []
                     else:
+                        # Found a non-full chunk, load its data
+                        self.current_chunk_data = chunk_data
                         break
                 except json.JSONDecodeError:
+                    print(f"Error decoding chunk data from {self.data_file.format(self.current_chunk)}. Starting with empty data.")
+                    # If file is corrupted, start with empty data
+                    self.current_chunk_data = []
                     break
 
+        print(f"Starting with chunk {self.current_chunk} containing {len(self.current_chunk_data)} games")
+
+        self.most_popular = {}
+        self.new = {}
+
         # Initialize all games with error handling
-        for key, value in self.games_dict.items():
+        for game_type in ["most_popular", "new"]:
             try:
-                print(f"Pobieranie {key}. To zajmie trochę czasu...")
-                games = self.get_games(value)
+                print(f"Pobieranie {game_type} games. To zajmie trochę czasu...")
+                games = self.get_games(game_type)
                 if games:
-                    self.__dict__[key] = games
-                print(f"Pobrano {len(games)} {key}")
-                print(f"Pierwsze 10 {key}: {games[:10]}")
+                    self.__dict__[game_type] = games
+                print(f"Pobrano {len(games)} {game_type} gier.")
             except Exception as e:
-                print(f"Error fetching {key}: {e}")
-                self.__dict__[key] = []
+                print(f"Error fetching {game_type} games: {e}")
 
     def _verify_proxy(self, proxy_url: str, timeout: int = 10) -> bool:
         """Verify if a proxy is working by testing it against multiple URLs."""
@@ -180,7 +197,11 @@ class GameScraper:
     def get_games(self, game_type):
         def fetch_page(page_num):
             try:
-                payload = f'sort_by={game_type}'
+                games_dict = {
+                    "most_popular": "RECOMMENDED_DESC",
+                    "new": "LATEST_DESC",
+                }
+                payload = f'sort_by={games_dict[game_type]}'
                 headers = {
                     'accept': 'application/json, text/plain, /',
                     'accept-language': 'pl,pl-PL;q=0.9',
@@ -190,7 +211,7 @@ class GameScraper:
                     'origin': 'https://casino.guru',
                     'pragma': 'no-cache',
                     'priority': 'u=1, i',
-                    'referer': 'https://casino.guru/free-casino-games/most-popular',
+                    'referer': 'https://casino.guru/free-casino-games/' + game_type.replace("_", "-"),
                     'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
                     'sec-ch-ua-mobile': '?0',
                     'sec-ch-ua-platform': '"macOS"',
@@ -201,7 +222,6 @@ class GameScraper:
                 }
                 url = "https://casino.guru/frontendService/gamesFilterServiceMore?page={}&initialPage=1"
 
-                print(f"Fetching {game_type} - Page: {page_num}")
                 response = self.make_request(
                     url.format(page_num),
                     method="POST",
@@ -209,26 +229,50 @@ class GameScraper:
                     payload=payload
                 )
 
+                games = {}
                 tree = html.fromstring(response.text)
-                titles = tree.xpath('//a[@class="game-item-name"]/text()')
+                game_items = tree.xpath('//div[@class="game-item"]')
+                if game_items:
+                    for item in game_items:
+                        title = item.xpath('.//a[@class="game-item-name"]/text()')
+                        provider = item.xpath('.//a[@class="game-item-name"]/span/text()')
+                        preview = item.xpath('.//div[contains(@class, "video")]/video/source[@type="video/mp4"]')
+                        if title:
+                            key = f"{title[0].strip().lower()}_{provider[0].strip().lower().replace('by ', '')}"
+                            games[key] = preview[0].get('src') or preview[0].get('data-src') if preview else None
 
-                # Check if we've reached the end
-                if not titles:
-                    return None
-
-                return [title.strip().lower() for title in titles]
+                return games
 
             except Exception as e:
                 print(f"Error fetching page {page_num}: {str(e)}")
                 return None
 
-        all_titles = []
-        max_workers = 5    # Number of concurrent threads
+        output_file = f"{game_type}_games.json"
+        max_workers = 4    # Number of concurrent threads
         current_page = 1
         end_reached = False
+        total_games = 0
+
+        # Check if file exists and has data
+        with self.file_lock:
+            if os.path.exists(output_file):
+                try:
+                    existing_data = read_from_file(output_file)
+                    total_games = len(existing_data)
+                    # Since each page has 20 games, calculate the starting page
+                    current_page = total_games // 20
+                    print(f"Found existing data with {total_games} games. Starting from page {current_page}")
+                except Exception as e:
+                    print(f"Error reading existing data: {e}")
+                    # Initialize file with empty dictionary if there's an error
+                    write_to_file({}, output_file)
+            else:
+                # Initialize file with empty dictionary
+                write_to_file({}, output_file)
+                print(f"Starting new data collection for {game_type}")
 
         try:
-            while not end_reached:
+            while current_page < 900 and not end_reached:
                 print(f"\nProcessing batch starting at page {current_page}")
                 batch_results = []
 
@@ -243,25 +287,36 @@ class GameScraper:
                     for future in concurrent.futures.as_completed(futures):
                         page_num = futures[future]
                         try:
-                            titles = future.result()
-                            if titles is None:
+                            games = future.result()
+                            if games:
+                                batch_results.append((page_num, games))
+                                print(f"Successfully processed page {page_num}, found {len(games)} games")
+                            else:
                                 end_reached = True
-                                print(f"No more games found after page {page_num-1}")
-                                break
+                                print(f"No games found at page {page_num}")
 
-                            batch_results.append((page_num, titles))
-                            print(f"Successfully processed page {page_num}, "
-                                f"found {len(titles)} games")
                         except Exception as e:
                             print(f"Error processing page {page_num}: {str(e)}")
                             end_reached = True
-                            break
 
-                # Sort batch results by page number and add to all_titles
-                for _, titles in sorted(batch_results):
-                    all_titles.extend(titles)
+                # Update file with new batch data
+                if batch_results:
+                    try:
+                        with self.file_lock:
+                            # Load current data
+                            current_data = read_from_file(output_file)
 
-                print(f"Total games found so far: {len(all_titles)}")
+                            # Update with new batch
+                            for _, games in sorted(batch_results):
+                                current_data.update(games)
+
+                            # Save updated data
+                            write_to_file(current_data, output_file)
+
+                            total_games = len(current_data)
+                            print(f"Updated {output_file} - Total games: {total_games}")
+                    except Exception as e:
+                        print(f"Error updating file with batch data: {e}")
 
                 if not end_reached:
                     current_page += max_workers
@@ -270,7 +325,12 @@ class GameScraper:
         except Exception as e:
             print(f"Unexpected error in get_games: {str(e)}")
 
-        return all_titles
+        # Return the games by reading the final file
+        try:
+            return read_from_file(output_file)
+        except Exception as e:
+            print(f"Error reading final games data: {e}")
+            return {}
 
     def get_processed_urls(self):
         processed_urls = set()
@@ -330,26 +390,18 @@ class GameScraper:
     def save_game_to_json(self, game_data):
         with self.file_lock:
             try:
-                current_data = []
+                # Add new game to current chunk data
+                self.current_chunk_data.append(game_data)
 
-                # Load current chunk file if it exists
-                if os.path.exists(self.data_file.format(self.current_chunk)):
-                    with open(self.data_file.format(self.current_chunk), 'r', encoding='utf-8') as f:
-                        try:
-                            current_data = json.load(f)
-                        except json.JSONDecodeError:
-                            current_data = []
+                # Save the updated chunk
+                write_to_file(self.current_chunk_data, self.data_file.format(self.current_chunk))
 
                 # Check if current chunk is full
-                if len(current_data) >= MAX_CHUNK_DATA:
+                if len(self.current_chunk_data) >= MAX_CHUNK_DATA:
                     self.current_chunk += 1
-                    current_data = []
+                    self.current_chunk_data = []
 
-                # Add new game data
-                current_data.append(game_data)
-
-                with open(self.data_file.format(self.current_chunk), 'w', encoding='utf-8') as f:
-                    json.dump(current_data, f, ensure_ascii=False, indent=2)
+                print(f"Saved game to chunk {self.current_chunk}. Current chunk size: {len(self.current_chunk_data)}")
 
             except Exception as e:
                 print(f"Error saving to file: {e}")
@@ -487,6 +539,9 @@ class GameScraper:
             thumbnail = tree.xpath('//div[@class="game-detail-main-info"]//img/@src')
             thumbnail_url = thumbnail[0] if thumbnail else None
 
+            likes = tree.xpath('//div[@class="games-box-controls-buttons"]/span//span[@class="text"]/span/text()')
+            like_value = likes[0] if likes else None
+
             provider_name = tree.xpath('//div[@class="game-provider-info-panel"]//h5/text()')
             provider_info = {}
             if provider_name:
@@ -540,22 +595,27 @@ class GameScraper:
             # Add game ranking
             popularity = None
             newest = None
-            highest_rtp = None
+            preview_url = None
             if title:
                 title_lower = title.lower()
-                if title_lower in self.popular_games:
-                    popularity = self.popular_games.index(title_lower) + 1
-                if title_lower in self.new_games:
-                    newest = self.new_games.index(title_lower) + 1
-                if title_lower in self.highest_rtp_games:
-                    highest_rtp = self.highest_rtp_games.index(title_lower) + 1
+                provider_lower = provider_info['title'].lower()
+                key = f"{title_lower}_{provider_lower}"
+
+                if key in self.most_popular:
+                    popularity = list(self.most_popular.keys()).index(key) + 1
+                    preview_url = self.most_popular[key]
+                if key in self.new:
+                    newest = list(self.new.keys()).index(key) + 1
+                    if not preview_url:
+                        preview_url = self.new[key]
 
             game_data = {
                 "title": title,
                 "popularity": popularity,
                 "newest": newest,
-                "highest_rtp": highest_rtp,
+                "likes": like_value,
                 "thumbnail": thumbnail_url,
+                "mp4_preview": preview_url,
                 "rating": float(rating_value) if rating_value else None,
                 "images": images,
                 "overview": overview[0].text_content().strip() if overview else None,
@@ -607,7 +667,7 @@ class GameScraper:
             with self.thread_count_lock:
                 self.active_threads -= 1
 
-    def analyze_sitemap(self, sitemap_url, max_workers=3):
+    def analyze_sitemap(self, sitemap_url, max_workers=4):
         try:
             self.processed_urls = self.get_processed_urls()
 
