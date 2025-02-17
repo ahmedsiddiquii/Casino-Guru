@@ -185,14 +185,14 @@ class GameScraper:
         self.session.mount("https://", adapter)
         self.session.headers = random.choice(self.headers_pool)
 
-        proxy = self._get_proxy()
-        if proxy:
-            print(f"Korzystanie z serwera proxy: {proxy}")
-            proxies = {
-                "http": proxy,
-                "https": proxy,
-            }
-            self.session.proxies.update(proxies)
+        # proxy = self._get_proxy()
+        # if proxy:
+        #     print(f"Korzystanie z serwera proxy: {proxy}")
+        #     proxies = {
+        #         "http": proxy,
+        #         "https": proxy,
+        #     }
+            # self.session.proxies.update(proxies)
 
     def get_games(self, game_type):
         def fetch_page(page_num):
